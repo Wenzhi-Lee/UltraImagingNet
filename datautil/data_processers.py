@@ -1,199 +1,236 @@
 import numpy as np
 import scipy.io
 import os
-from scipy.signal import cwt, morlet2, hilbert
-import matplotlib.pyplot as plt
+import re
+from scipy.signal import resample, hilbert
 import pywt
-from scipy.signal import resample
 from joblib import Parallel, delayed
 
-# 参数设置
-sampling_rate = 236.72e6  # 采样率
-fc = 2e6  # Morlet小波的中心频率
-totalscal = 64  # 设置 CWT 参数
-output_dir = 'output'  # 结果保存的文件夹
-if not os.path.exists(output_dir):
-    os.makedirs(output_dir)
+# ========================
+# 全局参数配置
+# ========================
+CONFIG = {
+    'sampling_rate': 236.72e6,   # 采样率 (Hz)
+    'central_freq': 2e6,         # Morlet小波中心频率 (Hz)
+    'total_scales': 64,          # CWT尺度总数
+    'output_dir': 'output',      # 输出目录
+    'resample_length': 1000,     # 重采样点数
+    'sound_speed': 5918,         # 声速 (m/s)
+    'grid_size': (64, 64),       # 相位差网格尺寸
+    'transducer_range': (-1.5, 1.6),
+    'sensor_range': (-25.6, 25.6),
+    'data_path': r'C:\Users\user\Desktop\Matlab\bin\wave'  # 数据存储路径
+}
 
+# ========================
+# 工具函数
+# ========================
+def create_directory(path):
+    """创建输出目录"""
+    if not os.path.exists(path):
+        os.makedirs(path)
+        print(f"创建目录: {path}")
 
-# 读取 .mat 文件并处理数据
-def load_data(file_path):
-    data = scipy.io.loadmat(file_path)
-    sensor_data = data['data']
-    return sensor_data
+def load_matfile(file_path):
+    """加载MATLAB数据文件"""
+    try:
+        data = scipy.io.loadmat(file_path)
+        return data['data']
+    except FileNotFoundError:
+        print(f"错误: 文件 {file_path} 不存在")
+        return None
+    except KeyError:
+        print(f"错误: 文件中未找到 'data' 字段")
+        return None
 
+def save_matfile(output_path, data_dict):
+    """保存数据到MAT文件"""
+    scipy.io.savemat(output_path, data_dict)
+    print(f"数据已保存至: {output_path}")
 
-# CWT计算
-def compute_cwt_for_sensor(i, j, sensor_data, scales, fc, sampling_rate):
-    extracted_data = sensor_data[i, j, :]
-
-    # 重新采样数据为1000个点
-    new_length = 1000
-    resampled_data = resample(extracted_data, new_length)  # 使用 scipy.signal.resample 进行重采样
-    sr = sampling_rate * new_length / extracted_data.shape[0]  # 新的采样率
-
+# ========================
+# 核心处理函数
+# ========================
+def compute_cwt_for_sensor(i, j, sensor_data, scales, sampling_rate):
+    """单个传感器的连续小波变换计算"""
+    # 数据重采样
+    raw_data = sensor_data[i, j, :]
+    resampled = resample(raw_data, CONFIG['resample_length'])
+    
+    # 计算新采样率
+    new_sr = sampling_rate * CONFIG['resample_length'] / raw_data.shape[0]
+    
     # 执行小波变换
-    cwtmatr, frequencies = pywt.cwt(resampled_data, scales, 'morl', 1.0 / sr)
+    coefficients, _ = pywt.cwt(resampled, scales, 'morl', 1.0 / new_sr)
+    
+    # 压缩结果
+    indices = np.linspace(0, coefficients.shape[1]-1, CONFIG['resample_length'], dtype=int)
+    return i, j//16, coefficients[:, indices].T  # 直接返回转置后的数据
 
-    # 压缩小波变换结果
-    indices = np.linspace(0, cwtmatr.shape[1] - 1, new_length, dtype=int)
-    compressed_wavelet_transform = cwtmatr[:, indices]
-
-    return i, j // 16, compressed_wavelet_transform
-
-
-def compute_cwt(sensor_data, num, sensor):
+def compute_cwt_pipeline(sensor_data, num_transducers=32, num_sensors=512):
+    """CWT计算流水线"""
+    # 参数初始化
     N = sensor_data.shape[2]
-    time_axis = np.arange(0, N) / sampling_rate  # 创建时间轴
+    scales = _calculate_scales()
+    
+    # 并行计算
+    results = Parallel(n_jobs=-1)(
+        delayed(compute_cwt_for_sensor)(i, j, sensor_data, scales, CONFIG['sampling_rate'])
+        for i in range(num_transducers) 
+        for j in range(0, num_sensors, 16)
+    )
 
-    # 设置 CWT 参数
-    new_length = 1000
-    new_sampling_rate = sampling_rate * new_length / N
-    print(f"New sampling rate: {new_sampling_rate} Hz")
+    # 结果重组
+    wavelet_data = np.zeros(
+        (num_transducers, num_transducers, CONFIG['resample_length'], CONFIG['total_scales']),
+        dtype=np.complex64
+    )
+    
+    for i, j, transform in results:
+        wavelet_data[i, j] = transform
+    
+    return wavelet_data
 
-    # 设置尺度
-    fc = pywt.central_frequency('morl')  # 计算小波函数的中心频率
-    cparam = 2 * fc * totalscal  # 常数c
-    scales = cparam / np.arange(totalscal+1, 1, -1)  # 为使转换后的频率序列是一等差序列，尺度序列必须取为这一形式（也即小波尺度）
+def _calculate_scales():
+    """计算小波尺度序列"""
+    fc = pywt.central_frequency('morl')
+    cparam = 2 * fc * CONFIG['total_scales']
+    return cparam / np.arange(CONFIG['total_scales']+1, 1, -1)
 
-    # 并行计算每个传感器数据的小波变换
-    results = Parallel(n_jobs=-1)(delayed(compute_cwt_for_sensor)(i, j, sensor_data, scales, fc, sampling_rate)
-                                  for i in range(num) for j in range(0, sensor, 16))
+# ========================
+# 相位处理模块
+# ========================
+def compute_phase(sensor_data):
+    """计算相位信息"""
+    num_t, num_s, _ = sensor_data.shape
+    phase_data = np.zeros_like(sensor_data, dtype=np.float32)
+    
+    for i in range(num_t):
+        for j in range(num_s):
+            analytic = hilbert(sensor_data[i, j, :])
+            phase_data[i, j, :] = np.angle(analytic)
+    
+    return phase_data
 
-    WaveletData = np.zeros((num, num, totalscal, new_length), dtype=np.complex64)
-    for i, j, compressed_wavelet_transform in results:
-        WaveletData[i, j, :, :] = compressed_wavelet_transform
-
-    return WaveletData
-
-
-# 相位计算
-def compute_phase(sensor_data, num_transducers, num_sensor):
-    PhaseData = np.zeros((num_transducers, num_sensor, sensor_data.shape[2]), dtype=np.float32)
-
-    for i in range(num_transducers):
-        for j in range(num_sensor):
-            extracted_data = sensor_data[i, j, :]
-            analytic_signal = hilbert(extracted_data)
-            phase = np.angle(analytic_signal)
-            PhaseData[i, j, :] = phase
-
-    return PhaseData
-
-
-# 计算相位差
-def compute_phase_difference(PhaseData, x_points, y_points, transducer_positions, sensor_positions):
-    phase_diff = np.zeros((len(transducer_positions), len(sensor_positions), 64, 64), dtype=np.float32)
-    v = 5918  # 声速 (单位：m/s)
-
-    for i in range(len(transducer_positions)):
-        grid_x, grid_y = np.meshgrid(x_points, y_points)
-        tx_pos = transducer_positions[i]
-        d_t = np.sqrt((grid_x - tx_pos) ** 2 + grid_y ** 2)
-
-        for x in range(len(sensor_positions)):
-            rx_pos_x = sensor_positions[x]
-            d_rx = np.sqrt((grid_x - rx_pos_x) ** 2 + grid_y ** 2)
-            t_total_x = (d_t + d_rx) * 0.001 / v  # 计算传播时间
-            t_sample_x = np.round(t_total_x * sampling_rate).astype(int)
-
-            signal_values_x = PhaseData[i, x, t_sample_x]
-            phase_diff[i, x, :, :] = signal_values_x
-
+def compute_phase_difference(phase_data, num_transducers):
+    """计算相位差矩阵"""
+    # 生成空间网格
+    x = np.linspace(*CONFIG['sensor_range'], CONFIG['grid_size'][0])
+    y = np.linspace(0, 51.2, CONFIG['grid_size'][1])
+    tx_positions = np.linspace(*CONFIG['transducer_range'], num_transducers)
+    
+    phase_diff = np.zeros((num_transducers, num_transducers, *CONFIG['grid_size']))
+    
+    for i, tx_pos in enumerate(tx_positions):
+        grid_x, grid_y = np.meshgrid(x, y)
+        d_t = np.hypot(grid_x - tx_pos, grid_y)
+        
+        for j, rx_pos in enumerate(x):
+            d_r = np.hypot(grid_x - rx_pos, grid_y)
+            travel_time = (d_t + d_r) * 1e-3 / CONFIG['sound_speed']
+            sample_idx = np.round(travel_time * CONFIG['sampling_rate']).astype(int)
+            
+            # 边界处理
+            np.clip(sample_idx, 0, phase_data.shape[2]-1, out=sample_idx)
+            phase_diff[i, j] = phase_data[i, j, sample_idx]
+    
     return phase_diff
 
+# ========================
+# 数据生成管道
+# ========================
+def process_file(file_name, defect_dict):
+    """单个文件处理流水线"""
+    # 初始化输出目录
+    create_directory(CONFIG['output_dir'])
+    
+    # 加载数据
+    file_path = os.path.join(CONFIG['data_path'], file_name)
+    sensor_data = load_matfile(file_path)
+    if sensor_data is None:
+        return None
 
-# 保存计算结果到文件
-def save_data(output_file, data_dict):
-    scipy.io.savemat(output_file, data_dict)
-    print(f"数据已成功保存到 {output_file}")
-
-
-# 处理文件
-def process_file(file_name):
-    # 获取当前文件的 defeat_matrix
-    defeat_matrix = defeat_dict.get(file_name)
-
-    # 读取数据
-    mat_file = r'C:\Users\user\Desktop\Matlab\bin\wave\{}'.format(file_name)
-    sensor_data = load_data(mat_file)
-    num = 32
-    sensor = 512
-
-    # CWT 计算
-    WaveletData = compute_cwt(sensor_data, num, sensor)
-
-    # 保存 CWT 结果
-    save_data(f"{output_dir}/WaveletData_{file_name}", {'WaveletData': WaveletData})
-
-    # 计算相位
-    sensor_data = sensor_data[:, ::16, :]
-    num_transducers = sensor_data.shape[0]
-    num_sensor = sensor_data.shape[1]
-    PhaseData = compute_phase(sensor_data, num_transducers, num_sensor)
-
-    # 计算相位差
-    x_points = np.linspace(-25.6, 25.6, 64)
-    y_points = np.linspace(0, 51.2, 64)
-    transducer_positions = np.linspace(-1.5, 1.6, num_transducers)
-    sensor_positions = np.linspace(-25.6, 25.6, num_transducers)
-    phase_diff = compute_phase_difference(PhaseData, x_points, y_points, transducer_positions, sensor_positions)
-
-    # 保存相位差数据
-    #save_data(f"{output_dir}/phase_data_{file_name}", {'phase_diff': phase_diff})
-
-    # 创建最终数据字典
-    final_data = {'wave': WaveletData, 'phase': phase_diff, 'defeat': defeat_matrix}
-
-    # 保存最终数据
-    save_data(f"{output_dir}/final_data_{file_name}", {'final_data': final_data})
-
-    # 输出 final_data 各部分的 shape
-    final_data_shapes = {key: value.shape for key, value in final_data.items()}
-    print(f"Final data shapes for {file_name}: {final_data_shapes}")
-
-    # 返回最终数据
+    # 小波变换处理
+    wavelet_data = compute_cwt_pipeline(sensor_data)
+    
+    # 相位处理
+    phase_data = compute_phase(sensor_data[:, ::16, :])
+    phase_diff = compute_phase_difference(phase_data, num_transducers=32)
+    
+    # 结果打包
+    final_data = {
+        'wave': wavelet_data,
+        'phase': phase_diff,
+        'defect': defect_dict[file_name]
+    }
+    
+    # 保存结果
+    output_path = os.path.join(CONFIG['output_dir'], f'final_{file_name}.mat')
+    save_matfile(output_path, {'final_data': final_data})
+    
+    # 打印形状信息
+    shapes = {k: v.shape for k, v in final_data.items()}
+    print(f"处理完成: {file_name}\n数据维度: {shapes}")
+    
     return final_data
 
+# ========================
+# 缺陷参数解析模块
+# ========================
+def parse_defect_parameters(file_names):
+    """自动解析文件名生成缺陷参数"""
+    pattern = r'x(\d+)y(\d+)(?:_(\d+))?$'
+    defect_dict = {}
+    
+    for fn in file_names:
+        matrix = np.zeros((10, 3))
+        
+        # 特殊处理无坐标文件
+        if fn in ('sensor_data_1', 'sensor_data_2'):
+            _handle_special_case(matrix, fn)
+        else:
+            # 正则解析参数
+            if match := re.search(pattern, fn):
+                x = int(match[1])
+                y = int(match[2])
+                radius = int(match[3]) if match[3] else 20
+                matrix[0] = [x, y, radius]
+        
+        defect_dict[fn] = matrix
+    
+    return defect_dict
 
-# 执行处理
-file_names = [
+def _handle_special_case(matrix, file_name):
+    """处理特殊文件案例"""
+    if file_name == 'sensor_data_1':
+        offsets = [(160 + i*60, 346 - i*90) for i in range(4)]
+    else:  # sensor_data_2
+        offsets = [(160 + i*60, 76 + i*90) for i in range(4)]
+    
+    for i, (x, y) in enumerate(offsets):
+        matrix[i] = [x, y, 20]
 
-'sensor_data_x346y346'
-]
+# ========================
+# 主程序
+# ========================
+if __name__ == "__main__":
+    # 文件列表
+    FILE_LIST = [
+        'sensor_data_x346y346', 'sensor_data_x346y346_10', 'sensor_data_x346y346_40',
+        'sensor_data_x406y76_10', 'sensor_data_x406y121_40', 'sensor_data_1',
+        'sensor_data_2', 'sensor_data_x106y346_10', 'sensor_data_x160y346',
+        'sensor_data_x166y76', 'sensor_data_x166y76_10', 'sensor_data_x166y76_40',
+        'sensor_data_x166y391', 'sensor_data_x206y256_10', 'sensor_data_x206y301_40',
+        'sensor_data_x220y256', 'sensor_data_x226y166', 'sensor_data_x226y166_10',
+        'sensor_data_x226y166_40', 'sensor_data_x280y166', 'sensor_data_x286y256',
+        'sensor_data_x286y256_10', 'sensor_data_x286y256_40', 'sensor_data_x306y166_10',
+        'sensor_data_x306y211_40', 'sensor_data_x340y76'
+    ]
 
+    # 生成缺陷参数
+    defect_params = parse_defect_parameters(FILE_LIST)
 
-# 生成 defeat_matrix 的函数
-def generate_defeat_matrix(num_defects):
-    # 创建一个 10x3 的全零矩阵
-    defeat_matrix = np.zeros((10, 3))
-
-    # 循环输入每个缺陷的 3 个维度
-    for i in range(num_defects):
-        print(f"请输入第 {i + 1} 个缺陷的 3 个维度：")
-        # 输入缺陷的 3 个维度，假设你会输入 3 个数值
-        x, y, radius = map(int, input("输入格式：x y radius").split())
-
-        # 将输入的缺陷数据填入矩阵中
-        defeat_matrix[i, :] = [x, y, radius]
-
-    return defeat_matrix
-
-
-# 为每个文件指定对应的 defeat_matrix
-defeat_dict = {}
-
-# 输入每个文件对应的缺陷数量，并生成对应的 defeat_matrix
-for file_name in file_names:
-    print(f"请输入文件 {file_name} 的缺陷数量：")
-    num_defects = int(input("缺陷数量："))
-
-    # 为每个文件生成对应的 defeat_matrix
-    defeat_matrix = generate_defeat_matrix(num_defects)
-
-    # 将生成的 defeat_matrix 存储到 defeat_dict 中
-    defeat_dict[file_name] = defeat_matrix
-
-for file_name in file_names:
-    final_data = process_file(file_name)
-    print(f"处理后的最终数据：{file_name}")
+    # 处理所有文件
+    for file in FILE_LIST:
+        print(f"\n{'='*40}\n正在处理文件: {file}\n{'='*40}")
+        result = process_file(file, defect_params)
