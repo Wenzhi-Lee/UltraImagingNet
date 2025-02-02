@@ -166,7 +166,7 @@ def process_file(file_name, defect_dict):
     
     # 保存结果
     output_path = os.path.join(CONFIG['output_dir'], f'final_{file_name}.mat')
-    save_matfile(output_path, {'final_data': final_data})
+    save_matfile(output_path, final_data)
     
     # 打印形状信息
     shapes = {k: v.shape for k, v in final_data.items()}
