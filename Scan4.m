@@ -123,58 +123,116 @@ sensor.mask = zeros(kgrid.Nx, kgrid.Ny);
 %sensor.mask(1,:) = 1;
 sensor.mask(end, :) = 1;
 
+if isempty(gcp('nocreate'))
+    parpool('local');
+end
+
+% 预处理需要传入并行环境的常量变量
+parallel_medium = medium;
+parallel_kgrid = kgrid;
+parallel_sensor = sensor;
+parallel_input_args = input_args;
+
 data = zeros(num_source, Ny, Nt);
+sensor_data_cell = cell(1, 32);
 
 disp(['Time step: ', num2str(kgrid.dt)]);
+% 转换为并行循环
+parfor i = 1:32
+    % 每个worker需要独立的变量副本
+    local_source = source;
+    local_kgrid = parallel_kgrid;
+    local_medium = parallel_medium;
+    local_sensor = parallel_sensor;
+    local_input_args = parallel_input_args;
+    
+    % 设置独立源位置
+    local_source.p_mask = zeros(Nx, Ny);
+    local_source.p_mask(end, Ny/2 - 16 + i) = 1;
+    
+    % 运行仿真（每个worker独立执行）
+    sensor_data = kspaceFirstOrder2D(...
+        local_kgrid,...
+        local_medium,...
+        local_source,...
+        local_sensor,...
+        local_input_args{:});
+    
+    % 将结果存储到临时变量中
+    sensor_data_cell{i} = sensor_data;
+end
+
+save('data_1.mat',"sensor_data_cell")
+
+%% 后处理显示（串行执行）
+% for i = 1:32
+%     % 加载保存的数据
+%     sensor_data = sensor_data_cell{i};
+% 
+%     % 显示代码（保持原有显示逻辑）
+%     y1 = round(Ny/4);
+%     y2 = round(Ny/2);
+%     y3 = round(3*Ny/4);
+% 
+%     sensor_data_y1 = sensor_data(y1, :);
+%     sensor_data_y2 = sensor_data(y2, :);
+%     sensor_data_y3 = sensor_data(y3, :);
+% 
+%     % 创建独立图形窗口
+%     figure('Name',['Source Position ',num2str(i)]);
+%     subplot(3,1,1);
+%     plot(t1*1e6, sensor_data_y1);
+%     % ... 保持原有绘图代码
+% end
 
 % Run the simulation for 32 sources
-for i = 1:32
-    source.p_mask(end, Ny/2 - 16 + i) = 1; % Line source along y-axis center
-    source.p_mask(end, Ny/2 - 16 + i - 1) = 0; % Line source along y-axis center
-
-    % Run the simulation
-    sensor_data = kspaceFirstOrder2D(kgrid, medium, source, sensor, input_args{:});
-    sensor_data_directional = sensor_data;
-    data(i,:,:) = sensor_data;
-    
-    % 确保 y 轴索引是整数
-    y1 = round(Ny / 4);      % y = Ny / 4
-    y2 = round(Ny / 2);      % y = Ny / 2
-    y3 = round(Ny * 3 / 4);  % y = Ny * 3 / 4
-
-    index = 1;
-    % 提取传感器数据
-    sensor_data_y1 = sensor_data_directional(y1, index:end);  % Ny/4 的时间数据
-    sensor_data_y2 = sensor_data_directional(y2, index:end);  % Ny/2 的时间数据
-    sensor_data_y3 = sensor_data_directional(y3, index:end);  % Ny*3/4 的时间数据
-
-    t1 = (index:(size(sensor_data_directional, 2))) * dt; % 时间向量，单位为秒
-
-    % Visualize time-domain signals for different sensors
-    figure(2);
-    % Time domain signal at Ny/4
-    subplot(3, 1, 1);
-    plot(t1 * 1e6, sensor_data_y1, 'b');
-    title('Time Domain Signal at Ny/4');
-    xlabel('Time [\mu s]');
-    ylabel('Pressure [Pa]');
-    grid on;
-
-    % Time domain signal at Ny/2
-    subplot(3, 1, 2);
-    plot(t1 * 1e6, sensor_data_y2, 'r');
-    title('Time Domain Signal at Ny/2');
-    xlabel('Time [\mu s]');
-    ylabel('Pressure [Pa]');
-    grid on;
-
-    % Time domain signal at Ny*3/4
-    subplot(3, 1, 3);
-    plot(t1 * 1e6, sensor_data_y3, 'g');
-    title('Time Domain Signal at Ny*3/4');
-    xlabel('Time [\mu s]');
-    ylabel('Pressure [Pa]');
-    grid on;
-end
+% for i = 1:32
+%     source.p_mask(end, Ny/2 - 16 + i) = 1; % Line source along y-axis center
+%     source.p_mask(end, Ny/2 - 16 + i - 1) = 0; % Line source along y-axis center
+% 
+%     % Run the simulation
+%     sensor_data = kspaceFirstOrder2D(kgrid, medium, source, sensor, input_args{:});
+%     sensor_data_directional = sensor_data;
+%     data(i,:,:) = sensor_data;
+% 
+%     % 确保 y 轴索引是整数
+%     y1 = round(Ny / 4);      % y = Ny / 4
+%     y2 = round(Ny / 2);      % y = Ny / 2
+%     y3 = round(Ny * 3 / 4);  % y = Ny * 3 / 4
+% 
+%     index = 1;
+%     % 提取传感器数据
+%     sensor_data_y1 = sensor_data_directional(y1, index:end);  % Ny/4 的时间数据
+%     sensor_data_y2 = sensor_data_directional(y2, index:end);  % Ny/2 的时间数据
+%     sensor_data_y3 = sensor_data_directional(y3, index:end);  % Ny*3/4 的时间数据
+% 
+%     t1 = (index:(size(sensor_data_directional, 2))) * dt; % 时间向量，单位为秒
+% 
+%     % Visualize time-domain signals for different sensors
+%     figure(2);
+%     % Time domain signal at Ny/4
+%     subplot(3, 1, 1);
+%     plot(t1 * 1e6, sensor_data_y1, 'b');
+%     title('Time Domain Signal at Ny/4');
+%     xlabel('Time [\mu s]');
+%     ylabel('Pressure [Pa]');
+%     grid on;
+% 
+%     % Time domain signal at Ny/2
+%     subplot(3, 1, 2);
+%     plot(t1 * 1e6, sensor_data_y2, 'r');
+%     title('Time Domain Signal at Ny/2');
+%     xlabel('Time [\mu s]');
+%     ylabel('Pressure [Pa]');
+%     grid on;
+% 
+%     % Time domain signal at Ny*3/4
+%     subplot(3, 1, 3);
+%     plot(t1 * 1e6, sensor_data_y3, 'g');
+%     title('Time Domain Signal at Ny*3/4');
+%     xlabel('Time [\mu s]');
+%     ylabel('Pressure [Pa]');
+%     grid on;
+% end
 
 
