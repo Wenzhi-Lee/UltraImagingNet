@@ -1,5 +1,11 @@
 data/
 *.mat
 
+.idea/
+
 __pycache__/
 *.pyc
+
+*.asv
+
+*.ipynb

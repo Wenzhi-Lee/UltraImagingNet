@@ -1,23 +1,22 @@
 import numpy as np
 import scipy.io
 import os
-from scipy.spatial import KDTree
 from joblib import Parallel, delayed
 import matplotlib.pyplot as plt
 import matlab.engine
 from scipy.signal import resample
 import pywt
 from scipy.signal import hilbert
-
+import tqdm
 
 
 # ---------------------------- 全局配置 ----------------------------
 GRID_SIZE = 512  # 网格尺寸
-MAX_DEFECTS = 10  # 最大缺陷数量
+MAX_DEFECTS = 6  # 最大缺陷数量
 MIN_DEFECTS = 1  # 最小缺陷数量
 MIN_RADIUS = 5  # 最小缺陷半径
-MAX_RADIUS = 50  # 最大缺陷半径
-SAFE_MARGIN = 20  # 缺陷间安全间距
+MAX_RADIUS = 30  # 最大缺陷半径
+SAFE_MARGIN = 10  # 缺陷间安全间距
 SIMULATION_TIMES = 2  # 仿真次数
 COVERAGE_THRESHOLD = 0.8  # 覆盖率目标
 sampling_rate = 236.72e6  # 采样率
@@ -28,80 +27,40 @@ if not os.path.exists(output_dir):
 
 
 # ---------------------------- 核心功能模块 ----------------------------
-class CoverageOptimizer:
-    def __init__(self):
-        self.coverage_map = np.zeros((GRID_SIZE, GRID_SIZE), dtype=bool)
-        self.history_defects = []
+def defect_valid(current_defects, defect):
+    x, y, r = defect
 
-    def update_coverage(self, defects):
-        """更新覆盖图并记录历史缺陷"""
-        for x, y, r in defects:
-            x_min = max(0, int(x - r - SAFE_MARGIN))
-            x_max = min(GRID_SIZE, int(x + r + SAFE_MARGIN))
-            y_min = max(0, int(y - r - SAFE_MARGIN))
-            y_max = min(GRID_SIZE, int(y + r + SAFE_MARGIN))
-            self.coverage_map[x_min:x_max, y_min:y_max] = True
+    # 检查是否超出网格
+    if x - r < 0 or x + r > GRID_SIZE or y - r < 0 or y + r > GRID_SIZE:
+        return False
+    
+    # 检查是否与现有的缺陷重叠
+    for x0, y0, r0 in current_defects:
+        if np.sqrt((x - x0) ** 2 + (y - y0) ** 2) < r + r0 + SAFE_MARGIN:
+            return False
 
-        self.history_defects.extend(defects)
+    return True
 
-    def get_coverage_rate(self):
-        """计算当前覆盖率"""
-        return np.mean(self.coverage_map)
 
-    def generate_defects(self):
-        """生成优化后的缺陷配置"""
-        num_defects = np.random.randint(MIN_DEFECTS, MAX_DEFECTS + 1)
-        defects = []
+def generate_defects():
+    """生成优化后的缺陷配置"""
+    num_defects = np.random.randint(MIN_DEFECTS, MAX_DEFECTS + 1)
+    defects = []
 
-        # 优先填补未覆盖区域
-        uncovered = np.argwhere(~self.coverage_map)
-        if len(uncovered) > 0:
-            kdtree = KDTree(uncovered)
-            for _ in range(num_defects):
-                if len(defects) > 0:
-                    last_pos = defects[-1][:2]
-                    d, idx = kdtree.query(last_pos, k=10)  # 查找最近未覆盖点
-                    candidates = uncovered[idx]
-                else:
-                    candidates = uncovered
+    # 补充随机缺陷
+    while len(defects) < num_defects:
+        x = np.random.randint(0, GRID_SIZE)
+        y = np.random.randint(0, GRID_SIZE)
+        r = np.random.randint(MIN_RADIUS, MAX_RADIUS)
 
-                if len(candidates) > 0:
-                    idx = np.random.choice(len(candidates))
-                    x, y = candidates[idx]
-                    r = np.random.randint(MIN_RADIUS, MAX_RADIUS)
-                    defects.append((x, y, r))
-                    # 更新临时占用区域
-                    x_min = max(0, x - r - SAFE_MARGIN)
-                    x_max = min(GRID_SIZE, x + r + SAFE_MARGIN)
-                    y_min = max(0, y - r - SAFE_MARGIN)
-                    y_max = min(GRID_SIZE, y + r + SAFE_MARGIN)
-                    self.coverage_map[x_min:x_max, y_min:y_max] = True
-                else:
-                    break
+        if defect_valid(defects, (x, y, r)):
+            defects.append((x, y, r))
 
-        # 补充随机缺陷
-        while len(defects) < num_defects:
-            x = np.random.randint(0, GRID_SIZE)
-            y = np.random.randint(0, GRID_SIZE)
-            r = np.random.randint(MIN_RADIUS, MAX_RADIUS)
-
-            # 检查碰撞
-            collision = False
-            for (ex, ey, er) in defects:
-                distance = np.sqrt((x - ex) ** 2 + (y - ey) ** 2)
-                if distance < (r + er + SAFE_MARGIN):
-                    collision = True
-                    break
-            if not collision:
-                defects.append((x, y, r))
-
-        return defects
+    return defects
 
 
 # ---------------------------- MATLAB 交互模块 ----------------------------
-def run_matlab_simulation(defects):
-    """运行 MATLAB 仿真并返回传感器数据"""
-    eng = matlab.engine.start_matlab()
+def run_matlab_simulation(eng, defects):
 
     # 构建 MATLAB 结构体
     matlab_defects = []
@@ -123,33 +82,29 @@ def run_matlab_simulation(defects):
     except Exception as e:
         print(f"MATLAB仿真失败: {str(e)}")
         sensor_data = np.zeros((32, 512, 1000), dtype=np.float32)
-    finally:
-        eng.quit()
 
     return sensor_data
 
 
 # ---------------------------- 数据处理管道 ----------------------------
-def process_simulation(sim_id, optimizer):
+def process_simulation(sim_id, eng):
     """单次仿真处理流程"""
 
     try:
         # 生成缺陷配置
-        defects = optimizer.generate_defects()
+        defects = generate_defects()
         print(f"生成缺陷: {defects}")  # 调试输出
 
         # 运行MATLAB仿真
-        sensor_data = run_matlab_simulation(defects)
+        sensor_data = run_matlab_simulation(eng, defects)
+        sensor_data = sensor_data.transpose(2, 1, 0)
 
         # 处理数据
-        final_data = process_file(
-            file_name=f"sim_{sim_id:04d}",
+        final_data = process_data(
+            file_name=f"sim_{sim_id:04d}.mat",
             sensor_data=sensor_data,
             defeat_matrix=np.array(defects)
         )
-
-        # 更新覆盖图
-        optimizer.update_coverage(defects)
 
         return final_data
     except Exception as e:
@@ -217,8 +172,8 @@ def compute_phase(sensor_data, num_transducers, num_sensor):
 
 
 # 计算相位差
-def compute_phase_difference(PhaseData, x_points, y_points, transducer_positions, sensor_positions):
-    phase_diff = np.zeros((len(transducer_positions), len(sensor_positions), 64, 64), dtype=np.float32)
+def compute_phase_grid(PhaseData, x_points, y_points, transducer_positions, sensor_positions):
+    phase_grid = np.zeros((len(transducer_positions), len(sensor_positions), GRID_SIZE,GRID_SIZE), dtype=np.float32)
     v = 5918  # 声速 (单位：m/s)
 
     for i in range(len(transducer_positions)):
@@ -233,12 +188,12 @@ def compute_phase_difference(PhaseData, x_points, y_points, transducer_positions
             t_sample_x = np.round(t_total_x * sampling_rate).astype(int)
 
             signal_values_x = PhaseData[i, x, t_sample_x]
-            phase_diff[i, x, :, :] = signal_values_x
+            phase_grid[i, x, :, :] = signal_values_x
 
-    return phase_diff
+    return phase_grid
 
 # ---------------------------- 修改后的处理函数 ----------------------------
-def process_file(file_name, sensor_data, defeat_matrix):
+def process_data(file_name, sensor_data, defeat_matrix):
     """处理内存数据版本的函数"""
     num_transducers =32
     x_points = np.linspace(-25.6, 25.6, 64)
@@ -252,15 +207,15 @@ def process_file(file_name, sensor_data, defeat_matrix):
     phase_data = compute_phase(sensor_data[:, ::16, :],32,32)
 
     # 相位差计算（假设已有实现）
-    phase_diff = compute_phase_difference(phase_data,x_points, y_points, transducer_positions, sensor_positions)
+    phase_grid = compute_phase_grid(phase_data,x_points, y_points, transducer_positions, sensor_positions)
 
     # 保存结果
     final_data = {
         'wave': wavelet_data,
-        'phase': phase_diff,
+        'phase': phase_grid,
         'defeat': defeat_matrix
     }
-    save_data(f"{output_dir}/final_data_{file_name}", {'final_data': final_data})
+    save_data(f"{output_dir}/final_data_{file_name}", final_data)
     return final_data
 
 # 保存计算结果到文件
@@ -270,40 +225,15 @@ def save_data(output_file, data_dict):
 
 # ---------------------------- 主执行流程 ----------------------------
 if __name__ == "__main__":
-    # 初始化覆盖优化器
-    coverage_optimizer = CoverageOptimizer()
-
-    # 并行执行仿真
-    results = Parallel(n_jobs=-1)(
-        delayed(process_simulation)(i, coverage_optimizer)
-        for i in range(SIMULATION_TIMES)
-    )
+    # 初始化MATLAB引擎
+    eng = matlab.engine.start_matlab()
 
     # 监控覆盖进度
     coverage_history = []
-    for i, result in enumerate(results):
-        if result is not None:
-            coverage = coverage_optimizer.get_coverage_rate()
-            coverage_history.append(coverage)
-            print(f"Simulation {i + 1}/{SIMULATION_TIMES} completed，current coverage: {coverage:.2%}")
+    for i, in tqdm.tqdm(SIMULATION_TIMES):
+        result = process_simulation(i, eng)
 
-            if coverage >= COVERAGE_THRESHOLD:
-                print(f"Cverage {COVERAGE_THRESHOLD:.0%}，stopped early")
-                break
-
-    # 可视化覆盖情况
-    plt.figure(figsize=(12, 5))
-
-    plt.subplot(1, 2, 1)
-    plt.imshow(coverage_optimizer.coverage_map.T, origin='lower')
-    plt.title(f"最终覆盖图 (覆盖率: {coverage_optimizer.get_coverage_rate():.2%})")
-
-    plt.subplot(1, 2, 2)
-    plt.plot(coverage_history)
-    plt.xlabel('仿真次数')
-    plt.ylabel('覆盖率')
-    plt.title('覆盖率增长曲线')
-    plt.grid(True)
-
-    plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, 'coverage_report.png'))
+        if result is None:
+            raise Exception("仿真失败")
+    
+    eng.quit()
