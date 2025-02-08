@@ -1,8 +1,5 @@
 import torch
 import torch.nn as nn
-from utils import model_profile
-
-from thop import profile, clever_format
 
 class WaveletFeature(nn.Module):
     

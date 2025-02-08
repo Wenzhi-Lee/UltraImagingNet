@@ -9,3 +9,6 @@ __pycache__/
 *.asv
 
 *.ipynb
+!eval.ipynb
+
+*.pth
