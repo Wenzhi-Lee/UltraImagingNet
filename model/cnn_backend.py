@@ -2,79 +2,75 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch
 
-from model.utils import model_profile
-from model.cbam import CBAM
+from .utils import model_profile
+from .cbam import CBAM
+from .residual_block import ResidualBlock
 
 class CnnBackend(nn.Module):
 
-    def __init__(self, gridN, td_num):
+    def __init__(self, gridN):
         super(CnnBackend, self).__init__()
 
         self.gridN = gridN
-        self.td_num = td_num
 
-        self.cbam1 = CBAM(td_num)
+        # (n, 1, 512, 512) -> (n, 16, 128, 128)
+        self.conv1 = nn.Conv2d(in_channels=1, out_channels=16, kernel_size=7, stride=2, padding=3)
+        self.pool1 = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
+        self.cbam1 = CBAM(16)
 
-        self.conv1 = nn.Conv2d(in_channels=td_num, out_channels=16, kernel_size=3, padding=1)
-        self.pool1 = nn.MaxPool2d(kernel_size=8, stride=8)
+        # (n, 16, 128, 128) -> (n, 32, 64, 64)
+        self.res16 = nn.Sequential(
+            ResidualBlock(16, 16),
+            ResidualBlock(16, 16),
+            CBAM(16),
+            ResidualBlock(16, 32, stride=2, downsample=nn.Conv2d(16, 32, 1, 2))
+        )
 
-        self.conv2 = nn.Conv2d(in_channels=16, out_channels=32, kernel_size=3, padding=1)
-        self.pool2 = nn.MaxPool2d(kernel_size=4, stride=4)
 
-        self.conv3 = nn.Conv2d(in_channels=32, out_channels=64, kernel_size=3, padding=1)
-        self.pool3 = nn.MaxPool2d(kernel_size=2, stride=2)
+        # (n, 32, 64, 64) -> (n, 64, 32, 32)
+        self.res32 = nn.Sequential(
+            ResidualBlock(32, 32),
+            ResidualBlock(32, 32),
+            CBAM(32),
+            ResidualBlock(32, 64, stride=2, downsample=nn.Conv2d(32, 64, 1, 2))
+        )
 
-        self.gridDown = gridN // (8 * 4 * 2)
+        # (n, 64, 32, 32) -> (n, 128, 16, 16)
+        self.res64 = nn.Sequential(
+            ResidualBlock(64, 64),
+            ResidualBlock(64, 64),
+            CBAM(64),
+            ResidualBlock(64, 128, stride=2, downsample=nn.Conv2d(64, 128, 1, 2))
+        )
 
-        self.cbam2 = CBAM(64)
+        # (n, 128, 16, 16) -> (n, 8, 8, 8)
+        self.res128 = nn.Sequential(
+            ResidualBlock(128, 128),
+            ResidualBlock(128, 128),
+            CBAM(128)
+        )
+        self.conv2 = nn.Conv2d(in_channels=128, out_channels=256, kernel_size=3, stride=2, padding=1)
+        self.conv3 = nn.Conv2d(in_channels=256, out_channels=32, kernel_size=1, stride=1, padding=0)
+        self.conv4 = nn.Conv2d(in_channels=32, out_channels=8, kernel_size=1, stride=1, padding=0)
 
-        # Position encoding
-        self.pe = nn.Parameter(torch.randn(1, self.gridDown, self.gridDown), requires_grad=True)
-
-        # Multi-head attention
-        self.attention = nn.MultiheadAttention(embed_dim=64, num_heads=4)
-
-        # Fully connected layer
-        self.fc1 = nn.Linear(64 * self.gridDown * self.gridDown, 256)
-        self.fc2 = nn.Linear(256, 20 * 4)
-
-        self.dropout = nn.Dropout(0.5)
+        self.sigmoid = nn.Sigmoid()
 
     def forward(self, x):
-        # x: (td_num, gridN, gridN)
-
-        x = self.cbam1(x.unsqueeze(0)).squeeze(0)
-
-        x = F.relu(self.conv1(x))
-        x = self.pool1(x)
-
-        x = F.relu(self.conv2(x))
-        x = self.pool2(x)
-
-        x = F.relu(self.conv3(x))
-        x = self.pool3(x)
-
-        x = self.cbam2(x.unsqueeze(0)).squeeze(0)
-
-        # Position encoding
-        # x: (64, gridDown, gridDown)
-        # x += self.pe
-
-        # Flatten for multi-head attention
-        x = x.view(-1, self.gridDown * self.gridDown).permute(1, 0)
-
-        x, _ = self.attention(x, x, x)
-
-        # Flatten for fully connected layer
-        x = x.view(-1)
-        x = F.relu(self.fc1(x))
-        x = self.dropout(x)
-        x = self.fc2(x).view(20, 4)
+        # x: (batch, gridN, gridN)
         
-        x = torch.sigmoid(x)
+        x = x.unsqueeze(1)
+        
+        x = self.conv1(x)
+        x = self.pool1(x)
+        x = self.cbam1(x)
+
+        x = self.res16(x)
+        x = self.res32(x)
+        x = self.res64(x)
+        x = self.res128(x)
+        x = self.conv2(x)
+        x = self.conv3(x)
+        x = self.conv4(x)
+        x = self.sigmoid(x)
 
         return x
-    
-# x = torch.randn(32, 512, 512)
-# model = CnnBackend(512, 32)
-# print(model(x).shape)
