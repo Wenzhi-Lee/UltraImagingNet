@@ -11,8 +11,8 @@ def label_gen(raw_label):
     boxLen = gridN / boxNum
     for defect in raw_label:
         x, y, r = gridN - defect[0], defect[1], defect[2]
-        boxRow = int(x // boxLen)
-        boxCol = int(y // boxLen)
+        boxRow = int(x / boxLen)
+        boxCol = int(y / boxLen)
         label_temp = np.array([x - boxRow * boxLen, y - boxCol * boxLen, r])
         label_temp /= boxLen
         label.append([boxRow, boxCol, label_temp[0], label_temp[1], label_temp[2]])
@@ -39,7 +39,7 @@ class DefectDataset(data.Dataset):
             data = sio.loadmat(file_name.format(file_idx))
             phase = data['phase']
             # phase = np.mean(phase, axis=1)
-            phase = (phase - np.min(phase)) / (np.max(phase) - np.min(phase))
+            phase = (phase + np.pi) / (2 * np.pi)
             self.datas.extend(phase)
             self.label.extend([label_gen(data['defeat'])] * len(phase))
         print('Data loaded.')

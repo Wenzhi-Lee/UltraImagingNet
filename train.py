@@ -10,34 +10,38 @@ from dataset import DefectDataset, my_collate
 from torch.utils.data import DataLoader
 from myloss import MyLoss
 import utils
-import math
+import os
 
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+device = torch.device('cuda')
 
 # Hyperparameters
 lr = 1e-4
-epochs = 30
+epochs = 5
 
 # Data parameters
-file_name = 'data/final_data_sim_{:04d}.mat'
-file_num = 32
+file_name = 'data/data_{}.mat'
+file_num = len(os.listdir('data'))
 train_ratio = 0.9
 scan_num = 4
 gridN = 512
 
+# Model
+use_pretrained = True
+pretrain_model_name = 'model_v1.pth'
+
 model = DefeatDetectModel(gridN).to(device)
-model.apply(utils.weight_init)
+if use_pretrained:
+    model.load_state_dict(torch.load(pretrain_model_name, weights_only=True))
+else:
+    model.apply(utils.weight_init)
 
 optimizer = optim.Adam(model.parameters(), lr=lr)
-loss_fn = MyLoss().to(device)
+loss_fn = MyLoss(lambda_coord=2, lambda_r=5, lambda_noobj=0.05).to(device)
 
 start_time = time.time()
 
 train_data = DefectDataset(file_name, file_num * train_ratio)
-test_data = DefectDataset(file_name, file_num - int(file_num * train_ratio), file_num * train_ratio)
-
-train_loader = DataLoader(train_data, batch_size=32, shuffle=True, collate_fn=my_collate)
-test_loader = DataLoader(test_data, shuffle=False, collate_fn=my_collate)
+train_loader = DataLoader(train_data, batch_size=64, shuffle=True, collate_fn=my_collate)
 
 for epoch in range(epochs):
     # Training
@@ -74,57 +78,14 @@ for epoch in range(epochs):
 
 torch.save(model.state_dict(), 'model.pth')
 
-# Evaluation
-model.eval()
-
-prob_threshold = 0.5
-
+# Draw loss history
 import matplotlib.pyplot as plt
-import matplotlib.patches as patches
-
-fig, ax = plt.subplots(
-    max((len(test_loader) // scan_num + 3) // 4, 2), 4,
-    figsize=(16, 4 * ((len(test_loader) // scan_num + 3) // 4))
-)
-
-for i, (phase, label) in enumerate(test_loader):
-    if i % scan_num != 0:
-        continue
-
-    phase = phase.to(device)
-    pred = model(phase)[0].detach().cpu().numpy()
-    phase = phase[0].detach().cpu().numpy()
-
-    ind = i // scan_num
-    ax[ind // 4, ind % 4].imshow(phase, cmap='jet')
-    ax[ind // 4, ind % 4].set_title(f' {ind}')
-    ax[ind // 4, ind % 4].axis('off')
-
-    # Draw ground truth
-    boxN = 8
-    boxLen = gridN / boxN
-    for truth in label[0]:
-        x, y, r = truth[2] * boxLen, truth[3] * boxLen, truth[4] * boxLen
-        basex, basey = truth[0] * boxLen, truth[1] * boxLen
-        x, y = x + basex, y + basey
-        rect = patches.Circle((y, x), r, edgecolor='g', alpha=0.7)
-        ax[ind // 4, ind % 4].add_patch(rect)
-    
-    # Draw prediction
-    for i in range(boxN):
-        for j in range(boxN):
-            if pred[i][j][3] > prob_threshold:
-                x, y, r = pred[i][j][:3] * boxLen
-                basex, basey = i * boxLen, j * boxLen
-                x, y = x + basex, y + basey
-                rect = patches.Circle((y, x), r, edgecolor='r', lw=2, facecolor='none')
-                ax[ind // 4, ind % 4].add_patch(rect)
-            
-            if pred[i][j][7] > prob_threshold:
-                x, y, r = pred[i][j][4:7] * boxLen
-                basex, basey = i * boxLen, j * boxLen
-                x, y = x + basex, y + basey
-                rect = patches.Circle((y, x), r, edgecolor='r', lw=2, facecolor='none')
-                ax[ind // 4, ind % 4].add_patch(rect)
-
+plt.plot(loss_fn.xy_loss_hist, label='xy_loss')
+plt.plot(loss_fn.r_loss_hist, label='r_loss')
+plt.plot(loss_fn.coord_loss_hist, label='coord_loss')
+plt.plot(loss_fn.condobj_loss_hist, label='condobj_loss')
+plt.plot(loss_fn.condnoobj_loss_hist, label='condnoobj_loss')
+plt.plot(loss_fn.loss_hist, label='loss')
+plt.legend()
 plt.show()
+

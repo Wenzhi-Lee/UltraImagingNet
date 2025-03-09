@@ -26,7 +26,6 @@ class CnnBackend(nn.Module):
             ResidualBlock(16, 32, stride=2, downsample=nn.Conv2d(16, 32, 1, 2))
         )
 
-
         # (n, 32, 64, 64) -> (n, 64, 32, 32)
         self.res32 = nn.Sequential(
             ResidualBlock(32, 32),
@@ -43,7 +42,7 @@ class CnnBackend(nn.Module):
             ResidualBlock(64, 128, stride=2, downsample=nn.Conv2d(64, 128, 1, 2))
         )
 
-        # (n, 128, 16, 16) -> (n, 8, 8, 8)
+        # (n, 128, 16, 16) -> (n, 4, 8, 8)
         self.res128 = nn.Sequential(
             ResidualBlock(128, 128),
             ResidualBlock(128, 128),
@@ -51,7 +50,7 @@ class CnnBackend(nn.Module):
         )
         self.conv2 = nn.Conv2d(in_channels=128, out_channels=256, kernel_size=3, stride=2, padding=1)
         self.conv3 = nn.Conv2d(in_channels=256, out_channels=32, kernel_size=1, stride=1, padding=0)
-        self.conv4 = nn.Conv2d(in_channels=32, out_channels=8, kernel_size=1, stride=1, padding=0)
+        self.conv4 = nn.Conv2d(in_channels=32, out_channels=4, kernel_size=1, stride=1, padding=0)
 
         self.sigmoid = nn.Sigmoid()
 

@@ -2,48 +2,47 @@ import torch
 import torch.nn as nn
 import numpy as np
 
-from lossutil import iou
-
 class MyLoss(nn.Module):
-    def __init__(self, lambda_coord=5, lambda_noobj=0.5):
+    def __init__(self, lambda_coord=2, lambda_r=0.2, lambda_noobj=0.1):
         super(MyLoss, self).__init__()
         self.lambda_coord = lambda_coord
+        self.lambda_r = lambda_r
         self.lambda_noobj = lambda_noobj
+
+        self.xy_loss_hist = []
+        self.r_loss_hist = []
+        self.coord_loss_hist = []
+        self.condobj_loss_hist = []
+        self.condnoobj_loss_hist = []
+        self.loss_hist = []
     
     def forward(self, pred, label):
-        # pred: (n, 8, 8, 8)
-        # label: (n, defeats, 5)
+        # pred: (n, 4, 8, 8), (x, y, r, cond)
+        # label: (n, defeats, 5), (row, col, x, y, r)
 
         batch_size = pred.shape[0]
 
+        xy_loss = 0
+        r_loss = 0
         coord_loss = 0
-        cond_loss = 0
+        condobj_loss = 0
+        condnoobj_loss = 0
         for b in range(batch_size):
-            predb = pred[b]
+            predb = pred[b].permute(1, 2, 0)
+            # obj loss
             for y in label[b]:
-                boxRow, boxCol = y[0], y[1]
-                predbox = predb[int(boxRow)][int(boxCol)]
-                iou1 = iou(predbox[0], predbox[1], predbox[2], y[2], y[3], y[4])
-                iou2 = iou(predbox[4], predbox[5], predbox[6], y[2], y[3], y[4])
-                
-                # select the circle with higher iou
-                circle = predbox[:4]
-                un_conf = predbox[7]
-                bigger_iou = iou1
-                smaller_iou = iou2
-                if iou2 > iou1:
-                    circle = predbox[4:]
-                    un_conf = predbox[3]
-                    bigger_iou = iou2
-                    smaller_iou = iou1
-                
-                xy_loss = (circle[0] - y[2]) ** 2 + (circle[1] - y[3]) ** 2
-                r_loss = (circle[2] - y[4]) ** 2
+                label_row, label_col, label_x, label_y, label_r = y
 
-                coord_loss += (xy_loss + r_loss) * self.lambda_coord
+                pred_x, pred_y, pred_r, pred_cond = predb[int(label_row)][int(label_col)]
+                
+                # coord loss
+                dist = (label_x - pred_x) ** 2 + (label_y - pred_y) ** 2
 
-                cond_loss += (bigger_iou - circle[3]) ** 2
-                cond_loss += (smaller_iou - un_conf) ** 2 * self.lambda_noobj
+                xy_loss += dist * self.lambda_coord
+                r_loss += (label_r - pred_r) ** 2 * self.lambda_r
+
+                # cond loss
+                condobj_loss += (pred_cond - 1) ** 2
 
             # noobj loss
             obj_mask = torch.zeros(8, 8)
@@ -53,6 +52,22 @@ class MyLoss(nn.Module):
             for i in range(8):
                 for j in range(8):
                     if obj_mask[i][j] == 0:
-                        cond_loss += (predb[i][j][3] ** 2 + predb[i][j][7] ** 2) * self.lambda_noobj
-        
-        return (coord_loss + cond_loss) / batch_size
+                        condnoobj_loss += predb[i][j][3] ** 2 * self.lambda_noobj
+
+        xy_loss /= batch_size
+        r_loss /= batch_size
+        condobj_loss /= batch_size
+        condnoobj_loss /= batch_size
+
+        coord_loss = xy_loss + r_loss
+        cond_loss = condobj_loss + condnoobj_loss
+
+        self.xy_loss_hist.append(xy_loss.item())
+        self.r_loss_hist.append(r_loss.item())
+        self.coord_loss_hist.append(coord_loss.item())
+        self.condobj_loss_hist.append(condobj_loss.item())
+        self.condnoobj_loss_hist.append(condnoobj_loss.item())
+        self.loss_hist.append(coord_loss.item() + cond_loss.item())
+
+        return coord_loss + cond_loss
+    
